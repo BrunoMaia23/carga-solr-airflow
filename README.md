@@ -1,113 +1,51 @@
-# Pipeline Airflow + Solr + Docker
+# Carga de CSV no Solr com Airflow
 
-Este projeto implementa um **pipeline de dados** que formata um CSV de alunos e insere os registros no **Apache Solr**, orquestrado pelo **Apache Airflow**. Toda a infraestrutura roda em containers Docker para facilitar o deploy e garantir portabilidade.
+Desafio técnico de julho de 2025: pegar um CSV de alunos, limpar com pandas e indexar no Apache Solr,
+com o Airflow orquestrando e tudo rodando em Docker Compose. Os alunos do CSV são fictícios.
 
----
+## A DAG
 
-## 🚀 Tecnologias Utilizadas
+`solr_pipeline` (em `airflow/dags/`) roda uma vez por semana e tem duas tarefas, uma depois da outra:
 
-- **Python**: pandas, pysolr
-- **Apache Airflow** (CeleryExecutor)
-- **Apache Solr**
-- **Docker & Docker Compose**
-- **PostgreSQL** (metastore do Airflow)
-- **Redis** (broker Celery)
+1. `format_csv` lê `data/alunos.csv`, descarta as linhas sem nome ou sem data de nascimento, padroniza
+   os nomes, converte as datas (as que não convertem também saem) e calcula a idade pela data de
+   nascimento. O resultado vai para `data/alunos_clean.csv`.
+2. `load_to_solr` lê o CSV limpo, monta um documento por aluno e envia todos para a coleção
+   `alunos_collection` com o pysolr. O `id` do documento é o nome junto com a data de nascimento, então
+   rodar de novo sobrescreve os mesmos documentos em vez de duplicar.
 
----
+As duas funções ficam em `scripts/` e também rodam fora do Airflow, com pandas e pysolr instalados:
 
-## 📁 Estrutura do Projeto
-
-```
-school-solr-airflow/
-├── airflow/
-│   ├── dags/                # Definição da DAG (solr_pipeline_dag.py)
-│   ├── logs/                # Logs gerados pelo Airflow
-│   └── plugins/             # Plugins do Airflow (vazio por padrão)
-├── data/                    # Dados de entrada e saída
-│   ├── alunos.csv           # CSV original com dados dos alunos
-│   └── alunos_clean.csv     # CSV gerado pela task de formatação
-├── docker/                  # Arquivos Docker Compose e requirements
-│   ├── docker-compose-airflow.yml
-│   ├── docker-compose-solr.yml
-│   └── requirements.txt     # pandas, pysolr
-├── scripts/                 # Scripts Python das tasks
-│   ├── format_csv.py        # Formatação e limpeza do CSV
-│   └── load_to_solr.py      # Inserção dos dados no Solr
-└── README.md                # Este arquivo
+```bash
+python scripts/format_csv.py data/alunos.csv data/alunos_clean.csv
+python scripts/load_to_solr.py http://localhost:8983/solr/alunos_collection data/alunos_clean.csv
 ```
 
----
+A idade calculada fica no CSV limpo (`Idade_Calc`), mas o documento do Solr usa a coluna `Idade` que
+veio no arquivo. O filtro que comparava as duas está comentado no código, porque descartava todos os
+registros.
 
-## 📦 Pré-requisitos
+## Infraestrutura
 
-Antes de iniciar, instale:
+`docker/docker-compose-airflow.yml` sobe o Airflow 2.5.1 com CeleryExecutor: webserver e scheduler num
+contêiner, o worker em outro, Postgres para os metadados e Redis como broker. O Solr 8.11 sobe com a
+coleção já criada. As pastas `airflow/dags`, `scripts` e `data` são montadas nos contêineres, e o
+pysolr é instalado quando eles sobem. Usuário, senhas e a chave Fernet que estão no compose servem só
+para rodar localmente.
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop)
-- [Docker Compose](https://docs.docker.com/compose/install/)
+## Rodando
 
----
+Precisa de Docker com o Compose.
 
-## 🛠️ Como Executar
+```bash
+git clone https://github.com/BrunoMaia23/carga-solr-airflow.git
+cd carga-solr-airflow/docker
+docker compose -f docker-compose-solr.yml up -d
+docker compose -f docker-compose-airflow.yml up --build -d
+```
 
-1. **Clone o repositório**
-   ```bash
-   git clone https://github.com/BrunoMaia23/school-solr-airflow_projeto.git
-   cd school-solr-airflow_projeto
-   ```
+Em uns dois minutos o Airflow responde em http://localhost:8080 (usuário `admin`, senha `admin`). A
+DAG já nasce ativa e roda uma vez sozinha; para rodar de novo, use o botão de trigger. No Solr, em
+http://localhost:8983/solr, a coleção `alunos_collection` mostra os documentos com a consulta `q=*:*`.
 
-2. **Copie o CSV de alunos**
-   - Coloque o arquivo `alunos.csv` na pasta `data/`
-
-3. **Suba os containers**
-   ```bash
-   cd docker
-   docker-compose -f docker-compose-solr.yml up -d   # Solr
-   docker-compose -f docker-compose-airflow.yml up --build -d  # Airflow + Celery
-   ```
-
-4. **Acesse as interfaces**
-   - **Airflow UI**: http://localhost:8080  
-     Usuário: `admin` / Senha: `admin`
-   - **Solr Admin**: http://localhost:8983/solr
-
-5. **Execute o pipeline**
-   - Na Airflow UI, ative a DAG `solr_pipeline` (toggle On)
-   - Clique em **Trigger DAG**
-
-6. **Verifique no Solr**
-   - No Solr Admin, selecione a **collection** `alunos_collection`  
-   - Clique em **Query** e execute sem filtros (`q=*:*`)  
-   - Você verá os documentos inseridos pelo pipeline
-
----
-
-## 🧪 Descrição dos Scripts
-
-- **scripts/format_csv.py**  
-  - Lê `alunos.csv` com pandas
-  - Remove linhas com campos obrigatórios vazios
-  - Padroniza nomes e converte datas
-  - Calcula idade a partir de `Data de Nascimento`
-  - Salva o CSV limpo em `alunos_clean.csv`
-
-- **scripts/load_to_solr.py**  
-  - Lê `alunos_clean.csv`
-  - Constrói documentos no formato esperado pelo Solr
-  - Conecta ao Solr via pysolr e insere os documentos
-
----
-
-## 📝 Observações
-
-- **Executor**: utiliza CeleryExecutor para escalabilidade das tasks
-- **Tratamento de erros**: validações no Python para dados faltantes e logging de falhas
-- **Dependências**: listadas em `docker/requirements.txt`
-
----
-
-## ✅ Autor
-
-**Bruno Maia**  
-📧 brunomaia2304@gmail.com
-
-Este projeto foi desenvolvido para atender ao desafio técnico de **Importação de Dados para o Solr com Orquestração via Airflow**.
+Para desligar: `docker compose -f docker-compose-airflow.yml down`, e o mesmo com o arquivo do Solr.
